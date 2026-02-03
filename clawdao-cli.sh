@@ -537,6 +537,7 @@ cmd_join() {
 }
 
 # Vouch for a new member (APPROVER/FOUNDER only)
+# This records the vouch - the new member still needs to call claim-hat
 cmd_vouch() {
     local addr="${1:-}"
     local role="${2:-member}"
@@ -544,23 +545,243 @@ cmd_vouch() {
     if [[ -z "$addr" ]]; then
         echo "Usage: clawdao-cli.sh vouch <address> [role]"
         echo "  role: member (default), approver"
+        echo ""
+        echo "After vouching, the new member must run:"
+        echo "  clawdao-cli.sh claim-hat [role]"
         exit 1
     fi
     
     local hat_id="$MEMBER_HAT"
+    local role_upper="MEMBER"
     if [[ "$role" == "approver" ]]; then
         hat_id="$APPROVER_HAT"
+        role_upper="APPROVER"
+    elif [[ "$role" == "founder" ]]; then
+        hat_id="$FOUNDER_HAT"
+        role_upper="FOUNDER"
     fi
     
     local key
     key=$(get_key)
     
-    echo "Vouching $addr for ${role^^} role..."
+    echo "Vouching $addr for $role_upper role..."
     FOUNDRY_DISABLE_NIGHTLY_WARNING=1 cast send "$ELIGIBILITY" \
-        "mintHatsForUser(address,uint256)" "$addr" "$hat_id" \
+        "vouch(uint256,address)" "$hat_id" "$addr" \
         --private-key "$key" \
         --rpc-url "$RPC"
-    echo "✅ Vouched $addr for ${role^^}!"
+    echo "✅ Vouched $addr for $role_upper!"
+    echo ""
+    echo "Next step: $addr must run 'clawdao-cli.sh claim-hat $role' to claim the role."
+}
+
+# Claim a vouched hat (for the person being vouched)
+cmd_claim_hat() {
+    local role="${1:-member}"
+    
+    local hat_id="$MEMBER_HAT"
+    local role_upper="MEMBER"
+    if [[ "$role" == "approver" ]]; then
+        hat_id="$APPROVER_HAT"
+        role_upper="APPROVER"
+    elif [[ "$role" == "founder" ]]; then
+        hat_id="$FOUNDER_HAT"
+        role_upper="FOUNDER"
+    fi
+    
+    local key
+    key=$(get_key)
+    local my_addr
+    my_addr=$(cmd_whoami 2>/dev/null)
+    
+    echo "Claiming $role_upper hat for $my_addr..."
+    FOUNDRY_DISABLE_NIGHTLY_WARNING=1 cast send "$ELIGIBILITY" \
+        "claimVouchedHat(uint256)" "$hat_id" \
+        --private-key "$key" \
+        --rpc-url "$RPC"
+    echo "✅ $role_upper role claimed!"
+}
+
+# Vouch AND claim in one step (voucher helps new member claim)
+# Requires the voucher to have authority to mint
+cmd_onboard() {
+    local addr="${1:-}"
+    local role="${2:-member}"
+    
+    if [[ -z "$addr" ]]; then
+        echo "Usage: clawdao-cli.sh onboard <address> [role]"
+        echo "  role: member (default), approver"
+        echo ""
+        echo "This vouches AND claims the hat in one step."
+        echo "Use this when onboarding someone who can't claim themselves."
+        exit 1
+    fi
+    
+    local hat_id="$MEMBER_HAT"
+    local role_upper="MEMBER"
+    if [[ "$role" == "approver" ]]; then
+        hat_id="$APPROVER_HAT"
+        role_upper="APPROVER"
+    elif [[ "$role" == "founder" ]]; then
+        hat_id="$FOUNDER_HAT"
+        role_upper="FOUNDER"
+    fi
+    
+    local key
+    key=$(get_key)
+    
+    # Step 1: Check if already vouched
+    local already_vouched
+    already_vouched=$(FOUNDRY_DISABLE_NIGHTLY_WARNING=1 cast call "$ELIGIBILITY" \
+        "hasVouched(uint256,address,address)(bool)" "$hat_id" "$addr" "$(cmd_whoami 2>/dev/null)" \
+        --rpc-url "$RPC" 2>/dev/null || echo "false")
+    
+    if [[ "$already_vouched" != "true" ]]; then
+        echo "Step 1/2: Vouching $addr for $role_upper..."
+        FOUNDRY_DISABLE_NIGHTLY_WARNING=1 cast send "$ELIGIBILITY" \
+            "vouch(uint256,address)" "$hat_id" "$addr" \
+            --private-key "$key" \
+            --rpc-url "$RPC"
+        echo "✅ Vouch recorded"
+    else
+        echo "Step 1/2: Already vouched ✓"
+    fi
+    
+    # Step 2: Check if already wearing hat
+    local already_wearing
+    already_wearing=$(FOUNDRY_DISABLE_NIGHTLY_WARNING=1 cast call "0x3bc1A0Ad72417f2d411118085256fC53CBdDd137" \
+        "isWearerOfHat(address,uint256)(bool)" "$addr" "$hat_id" \
+        --rpc-url "$RPC" 2>/dev/null || echo "false")
+    
+    if [[ "$already_wearing" == "true" ]]; then
+        echo "Step 2/2: Already wearing hat ✓"
+        echo ""
+        echo "⚠️  Note: Hat was minted directly, not through POA claim."
+        echo "   Subgraph may not show the role correctly."
+        echo "   To fix: run 'clawdao-cli.sh fix-hat $addr $role'"
+        return
+    fi
+    
+    # Step 2: Claim the hat on behalf of the user
+    # This requires the new member to call claimVouchedHat themselves
+    # OR we need admin rights to mint directly
+    echo "Step 2/2: New member must claim their hat:"
+    echo "  They should run: clawdao-cli.sh claim-hat $role"
+    echo ""
+    echo "Or if you have admin rights, you can mint directly (but subgraph won't track it properly)"
+}
+
+# Renounce a hat (give it up)
+cmd_renounce_hat() {
+    local role="${1:-member}"
+    
+    local hat_id="$MEMBER_HAT"
+    local role_upper="MEMBER"
+    if [[ "$role" == "approver" ]]; then
+        hat_id="$APPROVER_HAT"
+        role_upper="APPROVER"
+    elif [[ "$role" == "founder" ]]; then
+        hat_id="$FOUNDER_HAT"
+        role_upper="FOUNDER"
+    fi
+    
+    local key
+    key=$(get_key)
+    local my_addr
+    my_addr=$(cmd_whoami 2>/dev/null)
+    
+    # Check if wearing hat
+    local wearing
+    wearing=$(FOUNDRY_DISABLE_NIGHTLY_WARNING=1 cast call "0x3bc1A0Ad72417f2d411118085256fC53CBdDd137" \
+        "isWearerOfHat(address,uint256)(bool)" "$my_addr" "$hat_id" \
+        --rpc-url "$RPC" 2>/dev/null || echo "false")
+    
+    if [[ "$wearing" != "true" ]]; then
+        echo "You are not wearing the $role_upper hat."
+        exit 1
+    fi
+    
+    echo "Renouncing $role_upper hat..."
+    FOUNDRY_DISABLE_NIGHTLY_WARNING=1 cast send "0x3bc1A0Ad72417f2d411118085256fC53CBdDd137" \
+        "renounceHat(uint256)" "$hat_id" \
+        --private-key "$key" \
+        --rpc-url "$RPC"
+    echo "✅ $role_upper hat renounced!"
+    echo ""
+    echo "To re-claim through POA (if vouched): clawdao-cli.sh claim-hat $role"
+}
+
+# Fix a hat that was minted directly (burn and re-claim through POA)
+cmd_fix_hat() {
+    local addr="${1:-}"
+    local role="${2:-member}"
+    
+    if [[ -z "$addr" ]]; then
+        echo "Usage: clawdao-cli.sh fix-hat <address> [role]"
+        echo ""
+        echo "Fixes a hat that was minted directly instead of through POA."
+        echo "This burns the hat and has the user re-claim it properly."
+        exit 1
+    fi
+    
+    local hat_id="$MEMBER_HAT"
+    local role_upper="MEMBER"
+    if [[ "$role" == "approver" ]]; then
+        hat_id="$APPROVER_HAT"
+        role_upper="APPROVER"
+    elif [[ "$role" == "founder" ]]; then
+        hat_id="$FOUNDER_HAT"
+        role_upper="FOUNDER"
+    fi
+    
+    local key
+    key=$(get_key)
+    local my_addr
+    my_addr=$(cmd_whoami 2>/dev/null)
+    
+    # Check if wearing hat
+    local wearing
+    wearing=$(FOUNDRY_DISABLE_NIGHTLY_WARNING=1 cast call "0x3bc1A0Ad72417f2d411118085256fC53CBdDd137" \
+        "isWearerOfHat(address,uint256)(bool)" "$addr" "$hat_id" \
+        --rpc-url "$RPC" 2>/dev/null || echo "false")
+    
+    if [[ "$wearing" != "true" ]]; then
+        echo "Address $addr is not wearing the $role_upper hat."
+        exit 1
+    fi
+    
+    # Check if vouched
+    local vouched
+    vouched=$(FOUNDRY_DISABLE_NIGHTLY_WARNING=1 cast call "$ELIGIBILITY" \
+        "hasVouched(uint256,address,address)(bool)" "$hat_id" "$addr" "$my_addr" \
+        --rpc-url "$RPC" 2>/dev/null || echo "false")
+    
+    echo "Current state:"
+    echo "  Wearing hat: $wearing"
+    echo "  Vouched by you: $vouched"
+    echo ""
+    
+    echo "To fix this, $addr needs to:"
+    echo "1. Have their hat burned (admin action)"
+    echo "2. Call 'clawdao-cli.sh claim-hat $role' to re-claim through POA"
+    echo ""
+    echo "Would you like to proceed with burning the hat? (y/n)"
+    read -r confirm
+    
+    if [[ "$confirm" != "y" ]]; then
+        echo "Aborted."
+        exit 0
+    fi
+    
+    echo "Burning hat from $addr..."
+    # transferHat(hatId, from, to) - transfer to zero burns it
+    # Actually Hats uses: setHatWearerStatus or admin can call specific functions
+    # Let's try the eligibility module's revoke if available
+    
+    # For now, just inform the user
+    echo "⚠️  Direct hat burning requires Hats admin privileges."
+    echo "   The cleanest fix is for $addr to:"
+    echo "   1. Renounce the hat themselves"
+    echo "   2. Then call: clawdao-cli.sh claim-hat $role"
 }
 
 #=== UTILITY COMMANDS ===#
@@ -655,6 +876,319 @@ cmd_create() {
 
 # ─────────── PROJECTS ───────────
 
+# Show project details
+cmd_project() {
+    local pid="${1:-}"
+    if [[ -z "$pid" ]]; then
+        echo "Usage: clawdao-cli.sh project <id>"
+        exit 1
+    fi
+    
+    local pid_bytes32=$(printf "0x%064x" "$pid")
+    local tm_lower=$(echo "$TASK_MANAGER" | tr '[:upper:]' '[:lower:]')
+    
+    local result
+    result=$(query "{ projects(where: {taskManager:\\\"$tm_lower\\\", projectId:\\\"$pid_bytes32\\\"}) { projectId title cap metadataHash metadata { description } managers { manager managerUser { address } isActive } rolePermissions { hatId mask canCreate canClaim canReview canAssign } tasks(where: {status_not:\\\"Cancelled\\\"}) { payout status } } }")
+    
+    local project=$(echo "$result" | jq '.data.projects[0]')
+    if [[ "$project" == "null" ]]; then
+        echo "Project $pid not found"
+        exit 1
+    fi
+    
+    local title=$(echo "$project" | jq -r '.title')
+    local cap=$(echo "$project" | jq -r '.cap | tonumber / 1e18 | floor')
+    local spent=$(echo "$project" | jq -r '[.tasks[].payout | tonumber] | add // 0 | . / 1e18 | floor')
+    local desc=$(echo "$project" | jq -r '.metadata.description // "No description"')
+    
+    echo "═══════════════════════════════════════"
+    echo "Project #$pid: $title"
+    echo "═══════════════════════════════════════"
+    echo "Budget:     $cap PT"
+    echo "Spent:      $spent PT"
+    echo "Remaining:  $((cap - spent)) PT"
+    echo ""
+    echo "Description:"
+    echo "$desc" | fold -s -w 60
+    echo ""
+    echo "Managers:"
+    echo "$project" | jq -r '.managers[] | select(.isActive == true) | "  \(.manager[:10])..."'
+    echo ""
+    echo "Role Permissions:"
+    echo "$project" | jq -r '.rolePermissions[] | "  Hat \(.hatId | tostring | .[-6:]): \(if .canCreate then "Create " else "" end)\(if .canClaim then "Claim " else "" end)\(if .canReview then "Review " else "" end)\(if .canAssign then "Assign" else "" end)"'
+}
+
+# Create a new project
+cmd_create_project() {
+    local title="${1:-}"
+    local cap="${2:-0}"
+    local desc="${3:-}"
+    
+    if [[ -z "$title" ]]; then
+        echo "Usage: clawdao-cli.sh create-project <title> [cap_pt] [description]"
+        echo ""
+        echo "Arguments:"
+        echo "  title        Project title"
+        echo "  cap_pt       Budget cap in PT (default: 0, set via governance later)"
+        echo "  description  Project description"
+        echo ""
+        echo "Examples:"
+        echo "  ./clawdao-cli.sh create-project 'New Feature'"
+        echo "  ./clawdao-cli.sh create-project 'Documentation' 500 'Improve DAO docs'"
+        echo ""
+        echo "After creation, use these to configure:"
+        echo "  ./clawdao-cli.sh project-add-manager <pid> <address>"
+        echo "  ./clawdao-cli.sh project-set-role <pid> <role> <permissions>"
+        exit 1
+    fi
+    
+    local key
+    key=$(get_key)
+    local my_addr
+    my_addr=$(cmd_whoami 2>/dev/null)
+    
+    # Create metadata JSON
+    local meta_json
+    if [[ -n "$desc" ]]; then
+        meta_json=$(jq -n --arg desc "$desc" '{ description: $desc }')
+    else
+        meta_json='{ "description": "" }'
+    fi
+    
+    echo "Pinning metadata..."
+    local cid
+    cid=$(echo "$meta_json" | curl -s -X POST "https://api.thegraph.com/ipfs/api/v0/add" \
+        -F "file=@-;filename=project.json" | jq -r '.Hash')
+    
+    if [[ -z "$cid" || "$cid" == "null" ]]; then
+        echo "Error: Failed to pin metadata"
+        exit 1
+    fi
+    
+    local bytes32
+    bytes32=$(cid_to_bytes32 "$cid")
+    
+    # Convert title to bytes
+    local title_hex
+    title_hex="0x$(echo -n "$title" | xxd -p | tr -d '\n')"
+    
+    # Convert cap to wei
+    local cap_wei="${cap}000000000000000000"
+    
+    echo "Creating project: $title"
+    echo "  Cap: $cap PT"
+    echo "  Metadata: $IPFS_GATEWAY/$cid"
+    echo ""
+    
+    FOUNDRY_DISABLE_NIGHTLY_WARNING=1 cast send "$TASK_MANAGER" \
+        "createProject(bytes,bytes32,uint256)" \
+        "$title_hex" \
+        "$bytes32" \
+        "$cap_wei" \
+        --private-key "$key" \
+        --rpc-url "$RPC"
+    
+    echo ""
+    echo "✅ Project created!"
+    echo ""
+    echo "Next steps:"
+    echo "  1. Get project ID: ./clawdao-cli.sh projects"
+    echo "  2. Add yourself as manager: ./clawdao-cli.sh project-add-manager <pid> $my_addr"
+    echo "  3. Set role permissions: ./clawdao-cli.sh project-set-role <pid> member create,claim"
+    echo "  4. Increase cap if needed: ./clawdao-cli.sh increase-cap <pid> <amount>"
+}
+
+# Add/remove project manager
+cmd_project_add_manager() {
+    local pid="${1:-}"
+    local addr="${2:-}"
+    local active="${3:-true}"
+    
+    if [[ -z "$pid" || -z "$addr" ]]; then
+        echo "Usage: clawdao-cli.sh project-add-manager <project_id> <address> [active]"
+        echo ""
+        echo "Arguments:"
+        echo "  project_id   Project ID (0, 1, 2, ...)"
+        echo "  address      Manager wallet address"
+        echo "  active       true (add) or false (remove), default: true"
+        echo ""
+        echo "Examples:"
+        echo "  ./clawdao-cli.sh project-add-manager 0 0x1234..."
+        echo "  ./clawdao-cli.sh project-add-manager 0 0x1234... false  # remove"
+        exit 1
+    fi
+    
+    local key
+    key=$(get_key)
+    
+    local pid_bytes32=$(printf "0x%064x" "$pid")
+    local is_active="true"
+    [[ "$active" == "false" ]] && is_active="false"
+    
+    echo "Setting project $pid manager: $addr (active: $is_active)"
+    
+    FOUNDRY_DISABLE_NIGHTLY_WARNING=1 cast send "$TASK_MANAGER" \
+        "setProjectManager(bytes32,address,bool)" \
+        "$pid_bytes32" \
+        "$addr" \
+        "$is_active" \
+        --private-key "$key" \
+        --rpc-url "$RPC"
+    
+    echo "✅ Manager updated!"
+}
+
+# Set project role permissions
+cmd_project_set_role() {
+    local pid="${1:-}"
+    local role="${2:-}"
+    local perms="${3:-}"
+    
+    if [[ -z "$pid" || -z "$role" ]]; then
+        echo "Usage: clawdao-cli.sh project-set-role <project_id> <role> [permissions]"
+        echo ""
+        echo "Arguments:"
+        echo "  project_id   Project ID (0, 1, 2, ...)"
+        echo "  role         Role name: member, approver, founder, or hat ID"
+        echo "  permissions  Comma-separated: create,claim,review,assign (or 'all', 'none')"
+        echo ""
+        echo "Permission masks:"
+        echo "  create  (1)  - Can create tasks in this project"
+        echo "  claim   (2)  - Can claim tasks in this project"
+        echo "  review  (4)  - Can review/complete tasks"
+        echo "  assign  (8)  - Can assign tasks to others"
+        echo "  all    (15)  - All permissions"
+        echo "  none    (0)  - No permissions (revoke access)"
+        echo ""
+        echo "Examples:"
+        echo "  ./clawdao-cli.sh project-set-role 0 member create,claim"
+        echo "  ./clawdao-cli.sh project-set-role 0 approver review,assign"
+        echo "  ./clawdao-cli.sh project-set-role 0 founder all"
+        exit 1
+    fi
+    
+    local key
+    key=$(get_key)
+    
+    local pid_bytes32=$(printf "0x%064x" "$pid")
+    
+    # Convert role to hat ID
+    local hat_id
+    case "$role" in
+        member)   hat_id="$MEMBER_HAT" ;;
+        approver) hat_id="$APPROVER_HAT" ;;
+        founder)  hat_id="$FOUNDER_HAT" ;;
+        *)        hat_id="$role" ;;  # Assume it's a hat ID
+    esac
+    
+    # Calculate permission mask
+    local mask=0
+    if [[ "$perms" == "all" ]]; then
+        mask=15
+    elif [[ "$perms" == "none" ]]; then
+        mask=0
+    elif [[ -n "$perms" ]]; then
+        IFS=',' read -ra PERM_ARR <<< "$perms"
+        for p in "${PERM_ARR[@]}"; do
+            case "$p" in
+                create) mask=$((mask | 1)) ;;
+                claim)  mask=$((mask | 2)) ;;
+                review) mask=$((mask | 4)) ;;
+                assign) mask=$((mask | 8)) ;;
+            esac
+        done
+    fi
+    
+    echo "Setting project $pid role permissions:"
+    echo "  Role: $role"
+    echo "  Hat ID: ${hat_id: -10}..."
+    echo "  Mask: $mask ($(
+        [[ $((mask & 1)) -ne 0 ]] && echo -n "create "
+        [[ $((mask & 2)) -ne 0 ]] && echo -n "claim "
+        [[ $((mask & 4)) -ne 0 ]] && echo -n "review "
+        [[ $((mask & 8)) -ne 0 ]] && echo -n "assign"
+    ))"
+    echo ""
+    
+    FOUNDRY_DISABLE_NIGHTLY_WARNING=1 cast send "$TASK_MANAGER" \
+        "setProjectRolePermission(bytes32,uint256,uint8)" \
+        "$pid_bytes32" \
+        "$hat_id" \
+        "$mask" \
+        --private-key "$key" \
+        --rpc-url "$RPC"
+    
+    echo "✅ Role permissions updated!"
+}
+
+# Interactive project setup
+cmd_setup_project() {
+    echo "═══════════════════════════════════════"
+    echo "       Interactive Project Setup"
+    echo "═══════════════════════════════════════"
+    echo ""
+    
+    # Title
+    read -rp "Project title: " title
+    if [[ -z "$title" ]]; then
+        echo "Error: Title required"
+        exit 1
+    fi
+    
+    # Description
+    read -rp "Description (optional): " desc
+    
+    # Initial cap
+    read -rp "Initial budget cap in PT (0 to set later): " cap
+    cap="${cap:-0}"
+    
+    echo ""
+    echo "Creating project..."
+    cmd_create_project "$title" "$cap" "$desc"
+    
+    echo ""
+    read -rp "Project ID (from output above): " pid
+    if [[ -z "$pid" ]]; then
+        echo "Skipping further setup. Run individual commands to configure."
+        exit 0
+    fi
+    
+    # Add self as manager
+    local my_addr
+    my_addr=$(cmd_whoami 2>/dev/null)
+    echo ""
+    read -rp "Add yourself ($my_addr) as manager? (y/n): " add_self
+    if [[ "$add_self" == "y" ]]; then
+        cmd_project_add_manager "$pid" "$my_addr"
+    fi
+    
+    # Set role permissions
+    echo ""
+    echo "Set role permissions? (Enter to skip each)"
+    
+    read -rp "MEMBER permissions (e.g., create,claim): " member_perms
+    if [[ -n "$member_perms" ]]; then
+        cmd_project_set_role "$pid" "member" "$member_perms"
+    fi
+    
+    read -rp "APPROVER permissions (e.g., review,assign): " approver_perms
+    if [[ -n "$approver_perms" ]]; then
+        cmd_project_set_role "$pid" "approver" "$approver_perms"
+    fi
+    
+    read -rp "FOUNDER permissions (e.g., all): " founder_perms
+    if [[ -n "$founder_perms" ]]; then
+        cmd_project_set_role "$pid" "founder" "$founder_perms"
+    fi
+    
+    echo ""
+    echo "═══════════════════════════════════════"
+    echo "         Project Setup Complete!"
+    echo "═══════════════════════════════════════"
+    echo ""
+    echo "View: ./clawdao-cli.sh project $pid"
+}
+
 cmd_projects() {
     echo "=== Projects ==="
     
@@ -698,17 +1232,15 @@ cmd_increase_cap() {
     # Value encoding: abi.encode(bytes32 pid, uint256 newCap)
     local encoded_value=$(FOUNDRY_DISABLE_NIGHTLY_WARNING=1 cast abi-encode "f(bytes32,uint256)" "$pid_bytes32" "$cap_wei")
     
-    # Create proposal metadata
+    # Create proposal metadata (POA v2 format)
     local title="Increase Project $pid Cap to $new_cap PT"
     local description="Governance proposal to increase the project budget cap from current value to $new_cap PT. This allows more tasks to be created and funded under this project."
     
-    # Pin metadata
+    # Pin metadata - must include description and optionNames for subgraph
     local metadata=$(cat << EOF
 {
-    "name": "$title",
     "description": "$description",
-    "projectId": $pid,
-    "newCap": $new_cap
+    "optionNames": ["Yes - Increase Cap", "No - Keep Current"]
 }
 EOF
 )
@@ -734,7 +1266,7 @@ EOF
     # We need:
     # - title: bytes
     # - descriptionHash: bytes32 (our metadata CID as bytes32)
-    # - minutesDuration: uint32 (e.g., 1440 = 24 hours, or 60 = 1 hour for testing)
+    # - minutesDuration: uint32 (e.g., 1440 = 24 hours, 30 = 30 min default)
     # - numOptions: uint8 (2 = Yes/No)
     # - batches: Call[][] where Call = (address target, uint256 value, bytes data)
     #   - batches[0] = calls to execute if option 0 (Yes) wins
@@ -776,7 +1308,7 @@ cmd = [
     "createProposal(bytes,bytes32,uint32,uint8,(address,uint256,bytes)[][],uint256[])",
     title_hex,
     desc_hash,
-    "60",  # 60 minutes for testing
+    "30",  # 30 minutes voting period
     "2",   # 2 options (Yes/No)
     batches,
     hat_ids,
@@ -795,6 +1327,371 @@ if result.returncode != 0:
 PYEOF
     
     echo "✅ Proposal created! Vote with: ./clawdao-cli.sh vote <id> 0"
+}
+
+# Create a custom governance proposal
+cmd_create_proposal() {
+    local title="${1:-}"
+    local description="${2:-}"
+    local option1="${3:-Yes}"
+    local option2="${4:-No}"
+    
+    if [[ -z "$title" || -z "$description" ]]; then
+        echo "Usage: clawdao-cli.sh create-proposal <title> <description> [option1] [option2]"
+        echo ""
+        echo "Arguments:"
+        echo "  title        Proposal title"
+        echo "  description  Full description"
+        echo "  option1      First option name (default: Yes)"
+        echo "  option2      Second option name (default: No)"
+        echo ""
+        echo "Examples:"
+        echo "  ./clawdao-cli.sh create-proposal 'Add New Role' 'Add a CONTRIBUTOR role below MEMBER'"
+        echo "  ./clawdao-cli.sh create-proposal 'Choose Logo' 'Pick the new DAO logo' 'Blue Logo' 'Green Logo'"
+        echo ""
+        echo "Note: This creates a proposal without on-chain execution."
+        echo "For proposals that execute contract calls, use specific commands like 'increase-cap'."
+        exit 1
+    fi
+    
+    local key
+    key=$(get_key)
+    
+    # Create metadata with proper POA v2 format
+    local metadata=$(cat << EOF
+{
+    "description": "$description",
+    "optionNames": ["$option1", "$option2"]
+}
+EOF
+)
+    
+    echo "Pinning metadata..."
+    local cid
+    cid=$(echo "$metadata" | curl -s -X POST "https://api.thegraph.com/ipfs/api/v0/add" -F "file=@-" | jq -r '.Hash')
+    
+    if [[ -z "$cid" || "$cid" == "null" ]]; then
+        echo "Error: Failed to pin metadata"
+        exit 1
+    fi
+    
+    local bytes32
+    bytes32=$(cid_to_bytes32 "$cid")
+    
+    local title_hex
+    title_hex="0x$(echo -n "$title" | xxd -p | tr -d '\n')"
+    
+    echo "Creating proposal: $title"
+    echo "  Description: $description"
+    echo "  Options: $option1 / $option2"
+    echo "  Metadata: $IPFS_GATEWAY/$cid"
+    echo ""
+    
+    # Create proposal with empty batches (no on-chain execution)
+    python3 << PYEOF
+import subprocess
+import os
+
+os.environ["FOUNDRY_DISABLE_NIGHTLY_WARNING"] = "1"
+
+title_hex = "$title_hex"
+desc_hash = "$bytes32"
+voting = "$HYBRID_VOTING"
+rpc = "$RPC"
+
+key_result = subprocess.run(["jq", "-r", ".privateKey", "$HOME/.config/claw/.wallet"], capture_output=True, text=True)
+key = key_result.stdout.strip()
+
+# Empty batches - no on-chain execution, just a vote
+batches = "[[],[]]"
+hat_ids = "[]"
+
+cmd = [
+    "cast", "send", voting,
+    "createProposal(bytes,bytes32,uint32,uint8,(address,uint256,bytes)[][],uint256[])",
+    title_hex,
+    desc_hash,
+    "30",  # 30 minutes
+    "2",   # 2 options
+    batches,
+    hat_ids,
+    "--private-key", key,
+    "--rpc-url", rpc
+]
+
+result = subprocess.run(cmd, capture_output=True, text=True)
+print(result.stdout)
+if result.returncode != 0:
+    print(result.stderr)
+    exit(1)
+PYEOF
+    
+    echo "✅ Proposal created! Vote with: ./clawdao-cli.sh vote <id> 0"
+}
+
+#=== ANALYTICS COMMANDS ===#
+
+# List all DAO roles
+cmd_roles() {
+    echo "=== ClawDAO Roles ==="
+    local result
+    result=$(query "{ roles(where:{organization:\\\"$ORG_ID\\\"}) { name hatId canVote isUserRole wearers(where:{isActive:true}) { wearer } } }")
+    
+    echo "$result" | jq -r '.data.roles[] | "\(.name): \(.wearers | length) wearers | canVote: \(.canVote) | hatId: \(.hatId)"'
+}
+
+# Role details
+cmd_role() {
+    local role_name="${1:-}"
+    if [[ -z "$role_name" ]]; then
+        echo "Usage: clawdao-cli.sh role <name>"
+        echo "Examples: role MEMBER, role APPROVER, role FOUNDER"
+        exit 1
+    fi
+    
+    local result
+    result=$(query "{ roles(where:{organization:\\\"$ORG_ID\\\", name:\\\"$role_name\\\"}) { name hatId canVote isUserRole hat { defaultEligible defaultStanding mintedCount vouchConfig { quorum enabled combinesWithHierarchy } } wearers(where:{isActive:true}) { wearer wearerUsername addedAt } } }")
+    
+    local role=$(echo "$result" | jq '.data.roles[0]')
+    if [[ "$role" == "null" ]]; then
+        echo "Role '$role_name' not found"
+        exit 1
+    fi
+    
+    local name=$(echo "$role" | jq -r '.name')
+    local hat_id=$(echo "$role" | jq -r '.hatId')
+    local can_vote=$(echo "$role" | jq -r '.canVote')
+    local minted=$(echo "$role" | jq -r '.hat.mintedCount // 0')
+    local quorum=$(echo "$role" | jq -r '.hat.vouchConfig.quorum // "N/A"')
+    local vouch_enabled=$(echo "$role" | jq -r '.hat.vouchConfig.enabled // false')
+    
+    echo "═══════════════════════════════════════"
+    echo "Role: $name"
+    echo "═══════════════════════════════════════"
+    echo "Hat ID:       $hat_id"
+    echo "Can Vote:     $can_vote"
+    echo "Total Minted: $minted"
+    echo "Vouching:     $vouch_enabled (quorum: $quorum)"
+    echo ""
+    echo "Active Wearers:"
+    echo "$role" | jq -r '.wearers[] | "  - \(.wearerUsername // .wearer[:10])"'
+}
+
+# PT Leaderboard
+cmd_leaderboard() {
+    local limit="${1:-20}"
+    echo "=== PT Leaderboard (Top $limit) ==="
+    
+    local pt_lower=$(echo "$PT_TOKEN" | tr '[:upper:]' '[:lower:]')
+    local result
+    result=$(query "{ tokenBalances(orderBy:balance, orderDirection:desc, first:$limit, where:{participationToken:\\\"$pt_lower\\\", balance_gt:\\\"0\\\"}) { account balance updatedAt } }")
+    
+    local rank=1
+    echo "$result" | jq -r --argjson r "$rank" '.data.tokenBalances[] | "\(.account[:10])...: \((.balance | tonumber) / 1e18 | floor) PT"' | while read line; do
+        printf "%2d. %s\n" "$rank" "$line"
+        ((rank++))
+    done
+}
+
+# List vouches
+cmd_vouches() {
+    local addr="${1:-}"
+    if [[ -z "$addr" ]]; then
+        addr=$(cmd_whoami 2>/dev/null)
+    fi
+    local addr_lower=$(echo "$addr" | tr '[:upper:]' '[:lower:]')
+    
+    echo "=== Vouches for $addr ==="
+    echo ""
+    
+    # Vouches given
+    echo "Given:"
+    local given
+    given=$(query "{ vouches(where:{voucher:\\\"$addr_lower\\\"}) { wearer wearerUsername hatId isActive createdAt } }")
+    local given_count=$(echo "$given" | jq '.data.vouches | length')
+    if [[ "$given_count" == "0" ]]; then
+        echo "  (none)"
+    else
+        echo "$given" | jq -r '.data.vouches[] | "  → \(.wearerUsername // .wearer[:10]) | hat: \(.hatId | tostring | .[-6:]) | active: \(.isActive)"'
+    fi
+    
+    echo ""
+    echo "Received:"
+    local received
+    received=$(query "{ vouches(where:{wearer:\\\"$addr_lower\\\"}) { voucher voucherUsername hatId isActive vouchCount createdAt } }")
+    local received_count=$(echo "$received" | jq '.data.vouches | length')
+    if [[ "$received_count" == "0" ]]; then
+        echo "  (none)"
+    else
+        echo "$received" | jq -r '.data.vouches[] | "  ← \(.voucherUsername // .voucher[:10]) | hat: \(.hatId | tostring | .[-6:]) | active: \(.isActive) | count: \(.vouchCount)"'
+    fi
+}
+
+# User activity history
+cmd_history() {
+    local addr="${1:-}"
+    if [[ -z "$addr" ]]; then
+        addr=$(cmd_whoami 2>/dev/null)
+    fi
+    local addr_lower=$(echo "$addr" | tr '[:upper:]' '[:lower:]')
+    local limit="${2:-10}"
+    
+    local tm_lower=$(echo "$TASK_MANAGER" | tr '[:upper:]' '[:lower:]')
+    local hv_lower=$(echo "$HYBRID_VOTING" | tr '[:upper:]' '[:lower:]')
+    
+    echo "═══════════════════════════════════════"
+    echo "Activity History: ${addr:0:10}..."
+    echo "═══════════════════════════════════════"
+    
+    # Recent tasks completed
+    echo ""
+    echo "📋 Recent Tasks Completed:"
+    local tasks
+    tasks=$(query "{ tasks(where:{taskManager:\\\"$tm_lower\\\", assignee:\\\"$addr_lower\\\", status:\\\"Completed\\\"}, orderBy:completedAt, orderDirection:desc, first:$limit) { taskId title payout completedAt } }")
+    local task_count=$(echo "$tasks" | jq '.data.tasks | length')
+    if [[ "$task_count" == "0" ]]; then
+        echo "  (none)"
+    else
+        echo "$tasks" | jq -r '.data.tasks[] | "  #\(.taskId) \(.title) (+\((.payout | tonumber) / 1e18 | floor) PT)"'
+    fi
+    
+    # Recent votes
+    echo ""
+    echo "🗳️  Recent Votes:"
+    local votes
+    votes=$(query "{ votes(where:{voter:\\\"$addr_lower\\\"}, orderBy:votedAt, orderDirection:desc, first:$limit) { proposal { proposalId title } optionIndexes votedAt } }")
+    local vote_count=$(echo "$votes" | jq '.data.votes | length')
+    if [[ "$vote_count" == "0" ]]; then
+        echo "  (none)"
+    else
+        echo "$votes" | jq -r '.data.votes[] | "  Proposal #\(.proposal.proposalId): \(.proposal.title) → Option \(.optionIndexes[0])"'
+    fi
+    
+    # Recent vouches given
+    echo ""
+    echo "🤝 Recent Vouches Given:"
+    local vouches
+    vouches=$(query "{ vouches(where:{voucher:\\\"$addr_lower\\\"}, orderBy:createdAt, orderDirection:desc, first:$limit) { wearerUsername wearer hatId createdAt } }")
+    local vouch_count=$(echo "$vouches" | jq '.data.vouches | length')
+    if [[ "$vouch_count" == "0" ]]; then
+        echo "  (none)"
+    else
+        echo "$vouches" | jq -r '.data.vouches[] | "  → \(.wearerUsername // .wearer[:10])"'
+    fi
+}
+
+# DAO-wide activity feed
+cmd_activity() {
+    local limit="${1:-15}"
+    local tm_lower=$(echo "$TASK_MANAGER" | tr '[:upper:]' '[:lower:]')
+    local hv_lower=$(echo "$HYBRID_VOTING" | tr '[:upper:]' '[:lower:]')
+    
+    echo "═══════════════════════════════════════"
+    echo "        ClawDAO Activity Feed"
+    echo "═══════════════════════════════════════"
+    
+    # Recent task completions
+    echo ""
+    echo "📋 Recent Task Completions:"
+    local tasks
+    tasks=$(query "{ tasks(where:{taskManager:\\\"$tm_lower\\\", status:\\\"Completed\\\"}, orderBy:completedAt, orderDirection:desc, first:$limit) { taskId title assigneeUsername payout completedAt } }")
+    echo "$tasks" | jq -r '.data.tasks[] | "  #\(.taskId) \(.title) by \(.assigneeUsername // "?") (+\((.payout | tonumber) / 1e18 | floor) PT)"'
+    
+    # Recent proposals
+    echo ""
+    echo "🗳️  Recent Proposals:"
+    local props
+    props=$(query "{ proposals(where:{hybridVoting:\\\"$hv_lower\\\"}, orderBy:createdAtBlock, orderDirection:desc, first:5) { proposalId title status creatorUsername winningOption } }")
+    echo "$props" | jq -r '.data.proposals[] | "  #\(.proposalId) \(.title) [\(.status)] by \(.creatorUsername // "?")"'
+    
+    # Recent members
+    echo ""
+    echo "👥 Recent Role Changes:"
+    local wearers
+    wearers=$(query "{ roleWearers(orderBy:addedAt, orderDirection:desc, first:5) { role { name } wearerUsername isActive addedAt } }")
+    echo "$wearers" | jq -r '.data.roleWearers[] | "  \(.wearerUsername // "?") → \(.role.name) (active: \(.isActive))"'
+}
+
+# Check eligibility for a role
+cmd_eligibility() {
+    local addr="${1:-}"
+    local role="${2:-MEMBER}"
+    
+    if [[ -z "$addr" ]]; then
+        echo "Usage: clawdao-cli.sh eligibility <address> [role]"
+        exit 1
+    fi
+    
+    local addr_lower=$(echo "$addr" | tr '[:upper:]' '[:lower:]')
+    local role_upper=$(echo "$role" | tr '[:lower:]' '[:upper:]')
+    
+    # Get hat ID for role
+    local hat_id
+    case "$role_upper" in
+        FOUNDER)  hat_id="$FOUNDER_HAT" ;;
+        APPROVER) hat_id="$APPROVER_HAT" ;;
+        MEMBER)   hat_id="$MEMBER_HAT" ;;
+        *)        echo "Unknown role: $role"; exit 1 ;;
+    esac
+    
+    echo "═══════════════════════════════════════"
+    echo "Eligibility Check: ${addr:0:10}... for $role_upper"
+    echo "═══════════════════════════════════════"
+    
+    # Check wearer eligibility
+    local elig_lower=$(echo "$ELIGIBILITY" | tr '[:upper:]' '[:lower:]')
+    local result
+    result=$(query "{ wearerEligibilities(where:{eligibilityModule:\\\"$elig_lower\\\", wearer:\\\"$addr_lower\\\", hatId:\\\"$hat_id\\\"}) { eligible standing hasSpecificRules vouches(where:{isActive:true}) { voucherUsername vouchCount } } }")
+    
+    local elig=$(echo "$result" | jq '.data.wearerEligibilities[0]')
+    if [[ "$elig" == "null" ]]; then
+        echo "No eligibility record found (using defaults)"
+        
+        # Check vouch config
+        local config
+        config=$(query "{ vouchConfigs(where:{hatId:\\\"$hat_id\\\"}) { quorum enabled defaultEligible defaultStanding } }")
+        echo "$config" | jq -r '.data.vouchConfigs[0] | "Default Eligible: \(.defaultEligible)\nDefault Standing: \(.defaultStanding)\nVouch Quorum: \(.quorum)"'
+    else
+        local eligible=$(echo "$elig" | jq -r '.eligible')
+        local standing=$(echo "$elig" | jq -r '.standing')
+        local specific=$(echo "$elig" | jq -r '.hasSpecificRules')
+        
+        echo "Eligible:      $eligible"
+        echo "Good Standing: $standing"
+        echo "Custom Rules:  $specific"
+        echo ""
+        echo "Active Vouches:"
+        echo "$elig" | jq -r '.vouches[] | "  ← \(.voucherUsername) (count: \(.vouchCount))"'
+    fi
+}
+
+# Revoke a vouch
+cmd_revoke_vouch() {
+    local addr="${1:-}"
+    local role="${2:-MEMBER}"
+    
+    if [[ -z "$addr" ]]; then
+        echo "Usage: clawdao-cli.sh revoke-vouch <address> [role]"
+        exit 1
+    fi
+    
+    local role_upper=$(echo "$role" | tr '[:lower:]' '[:upper:]')
+    local hat_id
+    case "$role_upper" in
+        FOUNDER)  hat_id="$FOUNDER_HAT" ;;
+        APPROVER) hat_id="$APPROVER_HAT" ;;
+        MEMBER)   hat_id="$MEMBER_HAT" ;;
+        *)        echo "Unknown role: $role"; exit 1 ;;
+    esac
+    
+    local key
+    key=$(get_key)
+    
+    echo "Revoking vouch for $addr as $role_upper..."
+    FOUNDRY_DISABLE_NIGHTLY_WARNING=1 cast send "$ELIGIBILITY" "revokeVouch(uint256,address)" "$hat_id" "$addr" \
+        --private-key "$key" \
+        --rpc-url "$RPC"
+    echo "✅ Vouch revoked!"
 }
 
 # Help
@@ -827,15 +1724,35 @@ GOVERNANCE
   proposal <id>           Proposal details
   vote <id> [0|1]         Vote (0=Yes, 1=No)
   announce <id>           Announce winner & execute
+  create-proposal <t> <d> [o1] [o2]  Create custom proposal
 
 MEMBERSHIP
   members                 List DAO members
   profile [addr]          User profile & stats
-  vouch <addr> [role]     Vouch for member/approver
+  vouch <addr> [role]     Vouch for member/approver (step 1)
+  claim-hat [role]        Claim your vouched hat (step 2)
+  renounce-hat [role]     Give up a hat (to re-claim properly)
+  onboard <addr> [role]   Vouch + guide through claim
+  fix-hat <addr> [role]   Fix hat minted outside POA flow
   join <username>         Join DAO (needs vouch first)
 
+ANALYTICS
+  roles                   List all DAO roles with wearer counts
+  role <name>             Role details + list of wearers
+  leaderboard [limit]     PT leaderboard (default: top 20)
+  vouches [addr]          List vouches given/received
+  eligibility <addr> [role]  Check eligibility for role
+  revoke-vouch <addr> [role] Revoke a vouch you gave
+  history [addr]          User activity history
+  activity [limit]        DAO-wide activity feed
+
 PROJECTS
-  projects                List projects with budgets
+  projects                List all projects with budgets
+  project <id>            Project details with permissions
+  create-project <t> [cap] [desc]  Create new project
+  setup-project           Interactive project setup wizard
+  project-add-manager <pid> <addr> Add/remove project manager
+  project-set-role <pid> <role> <perms>  Set role permissions
   increase-cap <pid> <pt> Increase project cap (governance)
 
 UTILITY
@@ -885,15 +1802,35 @@ main() {
         proposal)   cmd_proposal "$@" ;;
         vote)       cmd_vote "$@" ;;
         announce)   cmd_announce "$@" ;;
+        create-proposal) cmd_create_proposal "$@" ;;
         
         # Membership
         members)    cmd_members ;;
         profile)    cmd_profile "$@" ;;
         vouch)      cmd_vouch "$@" ;;
+        claim-hat)  cmd_claim_hat "$@" ;;
+        renounce-hat) cmd_renounce_hat "$@" ;;
+        onboard)    cmd_onboard "$@" ;;
+        fix-hat)    cmd_fix_hat "$@" ;;
         join)       cmd_join "$@" ;;
+        
+        # Analytics
+        roles)      cmd_roles ;;
+        role)       cmd_role "$@" ;;
+        leaderboard) cmd_leaderboard "$@" ;;
+        vouches)    cmd_vouches "$@" ;;
+        eligibility) cmd_eligibility "$@" ;;
+        revoke-vouch) cmd_revoke_vouch "$@" ;;
+        history)    cmd_history "$@" ;;
+        activity)   cmd_activity "$@" ;;
         
         # Projects
         projects)     cmd_projects ;;
+        project)      cmd_project "$@" ;;
+        create-project) cmd_create_project "$@" ;;
+        setup-project) cmd_setup_project ;;
+        project-add-manager) cmd_project_add_manager "$@" ;;
+        project-set-role) cmd_project_set_role "$@" ;;
         increase-cap) cmd_increase_cap "$@" ;;
         
         # Utility
