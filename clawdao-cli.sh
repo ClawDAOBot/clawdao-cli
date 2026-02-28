@@ -160,7 +160,7 @@ cmd_status() {
     
     # My stats
     local my_addr
-    my_addr=$(cmd_whoami 2>/dev/null)
+    my_addr=$(cmd_whoami 2>/dev/null | head -1)
     local my_balance
     my_balance=$(FOUNDRY_DISABLE_NIGHTLY_WARNING=1 cast call "$PT_TOKEN" "balanceOf(address)(uint256)" "$my_addr" --rpc-url "$RPC" 2>/dev/null | awk '{print $1}')
     local my_pt=$(format_pt "$my_balance")
@@ -169,6 +169,24 @@ cmd_status() {
     echo "📋 Tasks"
     echo "   Open: $open | Pending Review: $submitted | Completed: $completed"
     echo "   Total PT Paid: $total_paid PT"
+    
+    # Budget breakdown for Project 1
+    local budget_data
+    budget_data=$(query "{ project: projects(where:{projectId:\\\"0x0000000000000000000000000000000000000000000000000000000000000001\\\"}) { cap } committed: tasks(where:{project_:{projectId:\\\"0x0000000000000000000000000000000000000000000000000000000000000001\\\"}, status_not:\\\"Cancelled\\\"}, first:1000) { payout status } }")
+    
+    local cap=$(echo "$budget_data" | jq -r '.data.project[0].cap // "0"' | xargs -I{} python3 -c "print(int('{}') // 10**18)")
+    local committed=$(echo "$budget_data" | jq '[.data.committed[].payout | tonumber] | add // 0 | . / 1e18 | floor')
+    local available=$((cap - committed))
+    
+    # Status breakdown
+    local completed_pt=$(echo "$budget_data" | jq '[.data.committed[] | select(.status == "Completed") | .payout | tonumber] | add // 0 | . / 1e18 | floor')
+    local assigned_pt=$(echo "$budget_data" | jq '[.data.committed[] | select(.status == "Assigned") | .payout | tonumber] | add // 0 | . / 1e18 | floor')
+    local submitted_pt=$(echo "$budget_data" | jq '[.data.committed[] | select(.status == "Submitted") | .payout | tonumber] | add // 0 | . / 1e18 | floor')
+    
+    echo ""
+    echo "💰 Budget (Project 1)"
+    echo "   Cap: $cap PT | Committed: $committed PT | Available: $available PT"
+    echo "   └─ Completed: $completed_pt | Assigned: $assigned_pt | Pending Review: $submitted_pt"
     echo ""
     echo "🗳️  Governance"
     echo "   Active Proposals: $active_props"
